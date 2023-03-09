@@ -67,7 +67,9 @@ fn main() -> MyResult<()>{
     let prefix = config.prefix;
     let bam = config.input;
     let mut pos_dic:tDic = AHashMap::new();
-    read_bam(&bam,&mut pos_dic)?;
+    let readsnum = read_bam(&bam,&mut pos_dic)?; // 统计总共reads
+    let mut scsnum:usize = 0;
+    let mut dcsnum:usize = 0;
     println!("Finish pos_dic!");
     let mut pos_vec = Vec::from_iter(pos_dic);
     println!("Fish trans_dic2vec");
@@ -79,20 +81,24 @@ fn main() -> MyResult<()>{
         println!("Start: thread {}",index);
         let outfile = format!("{outfold}/{prefix}");
         let tmp_thread = thread::spawn(move || {
-            parseReadI(pos_vec_arc,outfile, index).unwrap();
+            parseReadI(pos_vec_arc,outfile, index).unwrap()
         });
         handles.push(tmp_thread);
     }
     //let pos_vec_arc = Arc::new(Mutex::new(pos_vec));
     let outfile = format!("{outfold}/{prefix}");
     let temp_thread = thread::spawn(move||{
-        parseReadI(pos_vec, outfile,threads).unwrap();
+        parseReadI(pos_vec, outfile,threads).unwrap()
     });
 
     handles.push(temp_thread);
     for h in handles{
-        h.join().unwrap();
+        let (t_scs,t_dcs) = h.join().unwrap();
+        scsnum += t_scs;
+        dcsnum += t_dcs;
     }
+    println!("total reads:{}\tscs reads:{}\tscs rate:{}\tdcs reads:{}\tdcs rate:{}",
+    readsnum,scsnum,(scsnum as f32) /(readsnum as f32),dcsnum,(dcsnum as f32)/(readsnum as f32));
     println!("Finshed!");
     Ok(())
 }
@@ -215,10 +221,11 @@ pub fn get_read_info1(urad:&Record,urad2:&Record) -> ReadI{
 /*
 读取BAM 文件获取reads 信息。
  */
-pub fn read_bam(infile:&str,pos_dic:&mut tDic) -> MyResult<()>{
+pub fn read_bam(infile:&str,pos_dic:&mut tDic) -> MyResult<usize>{
     let mut bam = bam::Reader::from_path(infile)?;
-    let recodes = bam.records(); 
+    let recodes = bam.records();
     let mut pair_read = Vec::new();
+    let mut readsnum = 0 ;
     for read in recodes{
         let urad1 = read?;
         if urad1.flags() & 256 == 0{
@@ -240,18 +247,19 @@ pub fn read_bam(infile:&str,pos_dic:&mut tDic) -> MyResult<()>{
                 tmp.insert(readI.utag.clone(), vec![readI]);
                 pos_dic.insert(key,tmp);
             }
+            readsnum += 1;
             pair_read.clear();
         }
 
     }
-    Ok(())
+    Ok(readsnum)
 }
 
 
 /*
 解析ReadI 构建SCS 和 DCS 
  */
-pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
+pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<(usize,usize)>{
    
     let mut data = pos_vec;
     let vcc = vec!["5-5".to_string(),"6-6".to_string(),"7-7".to_string(),"8-8".to_string()];
@@ -259,6 +267,8 @@ pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
     let mut scs_r2 = File::create(format!("{outfile}_r2-scs-{index}.fastq")).unwrap();
     let mut dcs_r1 = File::create(format!("{outfile}_r1-dcs-{index}.fastq")).unwrap();
     let mut dcs_r2 = File::create(format!("{outfile}_r2-dcs-{index}.fastq")).unwrap();
+    let mut scsnum:usize = 0;
+    let mut dcsnum = 0;
     for (_,udic) in data.iter_mut(){
         // 构建SSCS；同一个比对位置的所有UMI类型都进行了构建；
         // 返回的{umi:[[],[],[]]} 每个子vector 的第一个元素是构建好的sscs的index位置。
@@ -270,13 +280,15 @@ pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
                 if i.len() > 1{                 
                     for j in 1..i.len(){
                         makeScs(vreads, i[0], i[j]);
-                    }                    
+                    }  
+                    scsnum += i.len();                  
                 }
                 newv.push(i[0]);
             }
             ssc_dic.insert(umi.clone(),newv);
         }
 
+        // UMI-CC 
         for utag in vcc.iter(){
             if let Some(v) = udic.get_mut(utag){
                 //[[1],[2,3],[4,6],5] 第一项是我们想要的reads,长度为1 的没有DCS， 长度为2的，构建DCS。
@@ -285,7 +297,8 @@ pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
                     if cc.len() == 1{
                         writer(&v[cc[0]], &mut scs_r1, &mut scs_r2)?;
                     } else{
-                        makeDcs_cc(v,cc[0],cc[1]);
+                        let tdcs = makeDcs_cc(v,cc[0],cc[1]);
+                        dcsnum += tdcs;
                         writer(&v[cc[0]], &mut dcs_r1, &mut dcs_r2)?;
                     }
                 }
@@ -324,7 +337,8 @@ pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
                 } else if i.len() == 3 {
                     writer(&empty2_readI[i[0]], &mut scs_r1, & mut scs_r2)?;
                 } else if i.len() == 2{
-                    let rad = makeDcs(&empty1_readI[i[0]],&empty2_readI[i[1]]);
+                    let (tdcs,rad) = makeDcs(&empty1_readI[i[0]],&empty2_readI[i[1]]);
+                    dcsnum += tdcs;
                     writer(&rad, &mut dcs_r1, & mut dcs_r2)?;
                 } 
             }
@@ -336,7 +350,7 @@ pub fn parseReadI(pos_vec:tVec,outfile:String,index:usize) -> MyResult<()>{
         data.set_len(0);
     }
     println!("Thread {index} Finished Clean data!");
-    Ok(())
+    Ok((scsnum,dcsnum))
 }
 
 /*
@@ -580,7 +594,8 @@ DCS 构建。
 DCS 符合下面的描述；
 1. 模板正链r1 的序列应和 模板 r2 的序列互补，BAM中，表现为 flag 相反，reads 相同； 同理r2。
  */
-pub fn makeDcs_cc(vrad:&mut Vec<ReadI>,i1:usize,i2:usize){
+pub fn makeDcs_cc(vrad:&mut Vec<ReadI>,i1:usize,i2:usize) -> usize{
+    let dcsnum = vrad[i1].cons + vrad[i2].cons;
     vrad[i1].dcs = vrad[i2].cons;
     //println!("DCS: {}\t{}",vrad[i1].qname,vrad[i2].qname);
     let r1_len = min(vrad[i1].seq_r1.len(),vrad[i2].seq_r2.len());
@@ -614,14 +629,16 @@ pub fn makeDcs_cc(vrad:&mut Vec<ReadI>,i1:usize,i2:usize){
         vrad[i1].seq_r2 = vrad[i2].seq_r1.clone();
         vrad[i1].qual_r2 = vrad[i2].qual_r1.clone();
     }
+    usize::from(dcsnum)
     
 }
 
 //pub fn makeDcs(rad1:&ReadI,rad2:& ReadI){
-pub fn makeDcs(rad1:&ReadI,rad2:&ReadI) -> ReadI{
+pub fn makeDcs(rad1:&ReadI,rad2:&ReadI) -> (usize,ReadI){
     //println!("DCS: {}\t{}",rad1.qname,rad2.qname);
     let cons = rad1.cons;
     let dcs = rad2.cons;
+    let dcsnum = cons + dcs;
     let mut seq_r1:Vec<u8>;
     let mut qual_r1:Vec<u8>;
     let mut seq_r2:Vec<u8>;
@@ -663,9 +680,10 @@ pub fn makeDcs(rad1:&ReadI,rad2:&ReadI) -> ReadI{
         }
     }
 
-    ReadI { cons,dcs,seq_r1,seq_r2,qual_r1,qual_r2,umi_r1:rad1.umi_r1.clone(),umi_r2:rad1.umi_r2.clone(),
+    let read = ReadI { cons,dcs,seq_r1,seq_r2,qual_r1,qual_r2,umi_r1:rad1.umi_r1.clone(),umi_r2:rad1.umi_r2.clone(),
         flag_r1:rad1.flag_r1,flag_r2:rad1.flag_r2,qname:rad1.qname.clone(),pos_key:rad1.pos_key.clone(),
-        utag:rad1.utag.clone() }
+        utag:rad1.utag.clone() };
+    (usize::from(dcsnum),read)
     
 
 }
